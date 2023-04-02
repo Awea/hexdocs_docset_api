@@ -1,0 +1,71 @@
+name: Build and release container
+
+on:
+  push:
+    branches:
+      - master
+      - "ci/**"
+      - "build/**"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          # by default the "default branch" would get checked out, here we want the branch that triggered the
+          # workflow that triggered this action
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - run: |
+          echo "APP_NAME=`grep 'app:' mix.exs | sed -e 's/\[//g' -e 's/ //g' -e 's/app://' -e 's/[:,]//g'`"  >> $GITHUB_ENV
+          echo "APP_VSN=`grep 'version:' mix.exs | cut -d '"' -f2`" >> $GITHUB_ENV
+
+      # Added extra `,,` to lowercase my username, uppercase are not allowed as repository name
+      - run: |
+          echo "CI_REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - run: |
+          cat <<JSON > config.json
+          {
+            "auths": {
+              "ghcr.io": {
+                "username": "$GITHUB_ACTOR",
+                "password": "${{ secrets.GITHUB_TOKEN }}"
+              }
+            }
+          }
+          JSON
+
+      - name: Build the builder
+        run: |
+          docker run \
+            -v $GITHUB_WORKSPACE:/workspace \
+            -v $GITHUB_WORKSPACE/config.json:/kaniko/.docker/config.json:ro \
+            gcr.io/kaniko-project/executor:latest \
+              --context dir:///workspace/ \
+              --dockerfile /workspace/Dockerfile \
+              --cache \
+              --push-retry 3 \
+              --target="builder" \
+              --build-arg APP_NAME="${{ env.APP_NAME }}" \
+              --build-arg APP_VSN="${{ env.APP_VSN }}" \
+              --destination="${{ env.CI_REGISTRY_IMAGE }}:builder-${{ github.event.workflow_run.head_sha }}" \
+              --destination="${{ env.CI_REGISTRY_IMAGE }}:builder"
+
+      - name: Create release
+        run: |
+          docker run \
+            -v $GITHUB_WORKSPACE:/workspace \
+            -v $GITHUB_WORKSPACE/config.json:/kaniko/.docker/config.json:ro \
+            gcr.io/kaniko-project/executor:latest \
+              --context dir:///workspace/ \
+              --dockerfile /workspace/Dockerfile \
+              --cache \
+              --push-retry 3 \
+              --target="production" \
+              --build-arg APP_NAME="${{ env.APP_NAME }}" \
+              --build-arg APP_VSN="${{ env.APP_VSN }}" \
+              --destination="${{ env.CI_REGISTRY_IMAGE }}:${{ github.event.workflow_run.head_sha }}"
